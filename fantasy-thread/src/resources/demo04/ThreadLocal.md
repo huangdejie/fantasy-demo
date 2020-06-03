@@ -73,3 +73,176 @@ ThreadLocal中的数组位置计算为什么要通过位与运算？
 
 ​			位运算的执行效率远远高于了取模运算
 
+#### 源码分析
+
+```java
+//key即为当前threadLocal，value即值
+private void set(ThreadLocal<?> key, Object value) {
+
+    // We don't use a fast path as with get() because it is at
+    // least as common to use set() to create new entries as
+    // it is to replace existing ones, in which case, a fast
+    // path would fail more often than not.
+
+    Entry[] tab = table;//获取entry[]数组
+    int len = tab.length;//数组长度
+    int i = key.threadLocalHashCode & (len-1);//得到索引i
+	//从当前位置开始遍历直到遇到entry为null为止
+    for (Entry e = tab[i];e != null;e = tab[i = nextIndex(i, len)]) {
+        //得到entry中的key(即threadLocal)
+        ThreadLocal<?> k = e.get();
+        //如果entry中的key与当前key相等，则直接替换并返回
+        if (k == key) {
+            e.value = value;
+            return;
+        }
+        //如果entry不为null但其key为null则表示此entry为脏entry替换
+        if (k == null) {
+            replaceStaleEntry(key, value, i);
+            return;
+        }
+    }
+
+    tab[i] = new Entry(key, value);
+    int sz = ++size;
+    if (!cleanSomeSlots(i, sz) && sz >= threshold)
+        rehash();
+}
+```
+
+**replaceStaleEntry(key, value, i);**
+
+```java
+//key为要操作的threadLocal,value为值，staleSlot为entry[]数组中脏entry的位置
+private void replaceStaleEntry(ThreadLocal<?> key, Object value,
+                                       int staleSlot) {
+    Entry[] tab = table;
+    int len = tab.length;
+    Entry e;
+
+    // Back up to check for prior stale entry in current run.
+    // We clean out whole runs at a time to avoid continual
+    // incremental rehashing due to garbage collector freeing
+    // up refs in bunches (i.e., whenever the collector runs).
+    //slotToExpunge为要清除的entry所在索引，初始为传过来的脏entry的位置
+    int slotToExpunge = staleSlot;
+    //1、从传过来的脏entry位置索引的前一个位置向前线性遍历entry[]数组，直到entry不为null为止
+    for (int i = prevIndex(staleSlot, len);(e = tab[i]) != null;i = prevIndex(i, len))
+        //如果遇到entry中的key为null则将slotToExpunge置为此entry所在位置
+        if (e.get() == null)
+            slotToExpunge = i;
+
+    // Find either the key or trailing null slot of run, whichever
+    // occurs first
+    //从传过来的脏entry位置索引的下一个位置开始向后遍历数组知道entry为null为止
+    for (int i = nextIndex(staleSlot, len);
+         (e = tab[i]) != null;
+         i = nextIndex(i, len)) {
+        ThreadLocal<?> k = e.get();
+
+        // If we find key, then we need to swap it
+        // with the stale entry to maintain hash table order.
+        // The newly stale slot, or any other stale slot
+        // encountered above it, can then be sent to expungeStaleEntry
+        // to remove or rehash all of the other entries in run.
+       //如果当前entry的key与传入的key相等，将当前entry的value更新，交换table[i]和table[staleSlot]
+        //此时table[staleSlot]就有了key——》valueNew，而table[i]为null——》valueOld
+        if (k == key) {
+            e.value = value;
+
+            tab[i] = tab[staleSlot];
+            tab[staleSlot] = e;
+
+            // Start expunge at preceding stale entry if it exists
+            //如果第1步中找到的位置和初始位置相同，则将slotToExpunge置为此时的位置i
+            if (slotToExpunge == staleSlot)
+                slotToExpunge = i;
+            //清除脏entry
+            cleanSomeSlots(expungeStaleEntry(slotToExpunge), len);
+            return;
+        }
+
+        // If we didn't find stale entry on backward scan, the
+        // first stale entry seen while scanning for key is the
+        // first still present in the run.
+        if (k == null && slotToExpunge == staleSlot)
+            slotToExpunge = i;
+    }
+
+    // If key not found, put new entry in stale slot
+    tab[staleSlot].value = null;
+    tab[staleSlot] = new Entry(key, value);
+
+    // If there are any other stale entries in run, expunge them
+    if (slotToExpunge != staleSlot)
+        cleanSomeSlots(expungeStaleEntry(slotToExpunge), len);
+}
+```
+
+**expungeStaleEntry(int staleSlot)**
+
+```java
+//staleSlot脏entry所在的位置
+private int expungeStaleEntry(int staleSlot) {
+    Entry[] tab = table;
+    int len = tab.length;
+
+    // expunge entry at staleSlot
+    //将value置为null，以及entry置为null，key无需置为null，因为已经是null了
+    tab[staleSlot].value = null;
+    tab[staleSlot] = null;
+    size--;
+
+    // Rehash until we encounter null
+    Entry e;
+    int i;
+    //从当前脏entry的下一个位置开始线性遍历，直到entry为null
+    for (i = nextIndex(staleSlot, len);
+         (e = tab[i]) != null;
+         i = nextIndex(i, len)) {
+        ThreadLocal<?> k = e.get();
+        //如果key为null则清空
+        if (k == null) {
+            e.value = null;
+            tab[i] = null;
+            size--;
+        } else {
+            //如果key不为null则根据threadLocal重新计算一次位置，说明是经过hash冲突
+            int h = k.threadLocalHashCode & (len - 1);
+            if (h != i) {
+                tab[i] = null;
+
+                // Unlike Knuth 6.4 Algorithm R, we must scan until
+                // null because multiple entries could have been stale.
+                //向下遍历找到找到为null的entry，然后将其替换为之前遍历的entry
+                while (tab[h] != null)
+                    h = nextIndex(h, len);
+                tab[h] = e;
+            }
+        }
+    }
+    return i;
+}
+```
+
+**cleanSomeSlots(int i, int n)**
+
+```java
+//i为脏entry开始向下遍历为null的entry所在的位置,n为数组长度
+private boolean cleanSomeSlots(int i, int n) {
+    boolean removed = false;
+    Entry[] tab = table;
+    int len = tab.length;
+    do {
+        i = nextIndex(i, len);
+        Entry e = tab[i];
+        if (e != null && e.get() == null) {
+            n = len;
+            removed = true;
+            i = expungeStaleEntry(i);
+        }
+    } while ( (n >>>= 1) != 0);
+    return removed;
+}
+```
+
