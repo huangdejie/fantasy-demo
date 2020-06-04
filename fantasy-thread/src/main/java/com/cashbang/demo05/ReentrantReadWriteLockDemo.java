@@ -42,7 +42,8 @@ public class ReentrantReadWriteLockDemo {
                     e.printStackTrace();
                 }
             }
-            return cacheMap.put(key, value);
+            cacheMap.put(key, value);
+            return value;
         }finally {
             write.unlock();
         }
