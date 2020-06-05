@@ -153,3 +153,180 @@ final boolean transferForSignal(Node node) {
 }
 ```
 
+
+
+### CountDownLatch
+
+计数器，通过设置state的值，调用await()方法会等待state的值减为0。其实际是共享锁
+
+await()
+
+```java
+public final void acquireSharedInterruptibly(int arg)
+        throws InterruptedException {
+    if (Thread.interrupted())
+        throw new InterruptedException();
+    if (tryAcquireShared(arg) < 0)//尝试获取资源，其实是判断state的值是否为0，为0返回1表示获得资源，否则返回-1表示未获取到资源，进入到下面这个方法。在AQS中，其返回值为负值表示获取失败；0表示获取成功，但没有剩余资源；正数表示获取成功，还有剩余资源，其他线程可以去获取
+        doAcquireSharedInterruptibly(arg);
+}
+```
+
+doAcquireSharedInterruptibly(arg);
+
+```java
+private void doAcquireSharedInterruptibly(int arg)
+    throws InterruptedException {
+    //添加到aqs队列
+    final Node node = addWaiter(Node.SHARED);
+    boolean failed = true;
+    try {
+        for (;;) {
+            final Node p = node.predecessor();
+            if (p == head) {
+                //判断是否拿到锁
+                int r = tryAcquireShared(arg);
+                if (r >= 0) {//1
+                    setHeadAndPropagate(node, r);
+                    p.next = null; // help GC
+                    failed = false;
+                    return;
+                }
+            }
+            if (shouldParkAfterFailedAcquire(p, node) &&
+                parkAndCheckInterrupt())
+                throw new InterruptedException();
+        }
+    } finally {
+        if (failed)
+            cancelAcquire(node);
+    }
+}
+```
+
+```java
+private void setHeadAndPropagate(Node node, int propagate) {
+    Node h = head; // Record old head for check below
+    //将当前节点设置成头节点
+    setHead(node);
+    /*
+     * Try to signal next queued node if:
+     *   Propagation was indicated by caller,
+     *     or was recorded (as h.waitStatus either before
+     *     or after setHead) by a previous operation
+     *     (note: this uses sign-check of waitStatus because
+     *      PROPAGATE status may transition to SIGNAL.)
+     * and
+     *   The next node is waiting in shared mode,
+     *     or we don't know, because it appears null
+     *
+     * The conservatism in both of these checks may cause
+     * unnecessary wake-ups, but only when there are multiple
+     * racing acquires/releases, so most need signals now or soon
+     * anyway.
+     */
+    if (propagate > 0 || h == null || h.waitStatus < 0 ||
+        (h = head) == null || h.waitStatus < 0) {
+        Node s = node.next;
+        if (s == null || s.isShared())
+            //唤醒后继节点的线程
+            doReleaseShared();
+    }
+}
+```
+
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+### BlockingQueue(FIFO)
+
+#### ArrayBlockingQueue
+
+##### 添加方法
+
+| 添加方法                             |                                                          |
+| ------------------------------------ | -------------------------------------------------------- |
+| add(value)                           | 队列满了的时候会抛出异常                                 |
+| offer(value)                         | 返回boolean值,true表示添加成功                           |
+| offer(value, timeout, TimeUnit unit) | 超时退出。若队列满了，会阻塞一段时间，超过时间后就会退出 |
+| put(value)                           | 队列满了会阻塞                                           |
+
+put()
+
+```java
+public void put(E e) throws InterruptedException {
+    //判断是否为null
+    checkNotNull(e);
+    final ReentrantLock lock = this.lock;
+    lock.lockInterruptibly();
+    try {
+        //count为队列中的元素个数，如果队列中的元素等于数组长度，则添加到notFull条件队列中进行阻塞等待,直到notFull.signal()唤醒
+        while (count == items.length)
+            notFull.await();
+        //添加元素并唤醒notEmpty条件队列中的阻塞线程
+        enqueue(e);
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+enqueue(E x)
+
+```java
+private void enqueue(E x) {
+    // assert lock.getHoldCount() == 1;
+    // assert items[putIndex] == null;
+    final Object[] items = this.items;
+    items[putIndex] = x;
+    if (++putIndex == items.length)
+        putIndex = 0;
+    count++;
+    notEmpty.signal();
+}
+```
+
+##### 获取方法
+
+| 方法                           |                    |
+| ------------------------------ | ------------------ |
+| remove()                       | 如果为空，抛出异常 |
+| poll()                         | 如果为空，返回null |
+| take()                         | 为空阻塞           |
+| queue.poll(4,TimeUnit.SECONDS) | 超时等待           |
+
+take()
+
+```java
+public E take() throws InterruptedException {
+    final ReentrantLock lock = this.lock;
+    lock.lockInterruptibly();
+    try {
+        while (count == 0)
+            //队列为空等待
+            notEmpty.await();
+        return dequeue();
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+```java
+private E dequeue() {
+    // assert lock.getHoldCount() == 1;
+    // assert items[takeIndex] != null;
+    final Object[] items = this.items;
+    @SuppressWarnings("unchecked")
+    E x = (E) items[takeIndex];
+    items[takeIndex] = null;
+    if (++takeIndex == items.length)
+        takeIndex = 0;
+    count--;
+    if (itrs != null)
+        itrs.elementDequeued();
+    //唤醒notFull中条件队列阻塞的线程
+    notFull.signal();
+    return x;
+}
+```
