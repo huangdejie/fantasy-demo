@@ -10,6 +10,7 @@
   <version>1.0-SNAPSHOT</version>
   <modules>
     <module>fantasy-thread</module>
+    <module>fantasy-microservice</module>
   </modules>
 
   <name>fantasy-demo</name>
